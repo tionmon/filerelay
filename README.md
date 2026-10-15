@@ -42,16 +42,18 @@ uploads), `data/token` (generated token, if you didn't set one).
 
 ### Option 1: one-click installer (recommended)
 
-`dist/filerelay-install.sh` is a single file with the Linux binaries (amd64,
-arm64, armv6/7) embedded. It needs nothing else: no internet access, Go or git.
-Copy it to server C and run it:
+`filerelay-install.sh` is a single file with the Linux binaries (amd64,
+arm64, armv6/7) embedded; it needs no Go, git or further downloads. On server C:
 
 ```bash
-scp dist/filerelay-install.sh root@C:
-ssh root@C
+curl -fLO https://github.com/tionmon/filerelay/releases/latest/download/filerelay-install.sh
 sudo bash filerelay-install.sh                               # HTTP on port 8080
 sudo bash filerelay-install.sh --domain relay.example.com    # HTTPS with a free Let's Encrypt certificate
 ```
+
+If C can't reach GitHub, download the file elsewhere (or build it with
+`./build.sh` → `dist/filerelay-install.sh`) and copy it over with
+`scp filerelay-install.sh root@C:`. Checksums are in each release's `SHA256SUMS`.
 
 It installs `/usr/local/bin/filerelay`, creates a `filerelay` system user and
 `/var/lib/filerelay`, writes `/etc/filerelay.env` with fresh tokens, sets up and
