@@ -1,0 +1,14 @@
+services:
+  filerelay:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      RELAY_TOKEN: ${RELAY_TOKEN:?set RELAY_TOKEN in .env}
+      RELAY_READ_TOKEN: ${RELAY_READ_TOKEN:-}
+      RELAY_TTL: ${RELAY_TTL:-72h}
+      RELAY_MAX_UPLOAD: ${RELAY_MAX_UPLOAD:-0}
+      RELAY_PUBLIC_URL: ${RELAY_PUBLIC_URL:-}

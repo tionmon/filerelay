@@ -1,0 +1,8 @@
+# HTTPS in front of filerelay with an automatic Let's Encrypt certificate.
+# Replace the domain, point its DNS at server C, then: caddy run --config Caddyfile
+relay.example.com {
+	reverse_proxy 127.0.0.1:8080 {
+		# Stream transfers through instead of buffering them.
+		flush_interval -1
+	}
+}
