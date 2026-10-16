@@ -297,9 +297,8 @@ start_service() {
 		systemctl enable filerelay >/dev/null 2>&1
 		systemctl restart filerelay
 	else
-		warn "systemd not found: starting filerelay in the background as root."
-		warn "It will NOT start again after a reboot; add this to your init system:"
-		warn "  set -a; . /etc/filerelay.env; set +a; exec /usr/local/bin/filerelay"
+		warn "no systemd: started in the background as root; it won't survive a reboot."
+		warn "add to your init system: set -a; . /etc/filerelay.env; set +a; exec /usr/local/bin/filerelay"
 		mkdir -p "$(dirname "$LOGF")"
 		(set -a; . "$ENVF"; set +a; nohup "$BIN" >>"$LOGF" 2>&1 &)
 	fi
@@ -310,85 +309,78 @@ open_firewall() {
 	local ports=("$(port_of "$LISTEN")") p
 	[ -z "$DOMAIN" ] || ports+=(80)
 	if have ufw && ufw status 2>/dev/null | grep -q "Status: active"; then
-		for p in "${ports[@]}"; do ufw allow "$p/tcp" >/dev/null && step "ufw: opened port $p/tcp"; done
+		for p in "${ports[@]}"; do ufw allow "$p/tcp" >/dev/null && step "Opened port $p/tcp in ufw"; done
 	elif have firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
 		for p in "${ports[@]}"; do firewall-cmd --quiet --permanent --add-port="$p/tcp"; done
-		firewall-cmd --quiet --reload && step "firewalld: opened port(s) ${ports[*]}/tcp"
+		firewall-cmd --quiet --reload && step "Opened port(s) ${ports[*]}/tcp in firewalld"
 	fi
 }
 
-# Waits until the service answers. With --domain this also obtains the
-# certificate, which proves DNS and ports 80/443 work from the internet.
+# Waits until the service answers and records the result in HEALTH for the
+# summary. With --domain this also obtains the certificate, which proves DNS
+# and ports 80/443 work from the internet.
+HEALTH=""
 health_check() {
-	local port url i
+	local port i
 	port=$(port_of "$LISTEN")
-	have curl || { warn "curl not found; skipping health check"; return 0; }
+	have curl || return 0
 	if [ -n "$DOMAIN" ]; then
 		local host="${DOMAIN%%,*}"
-		step "requesting a Let's Encrypt certificate for $host (can take ~30 s)"
-		url="https://$host:$port/healthz"
+		step "Requesting an HTTPS certificate for $host (up to a minute)"
 		for i in $(seq 1 12); do
-			curl -fsS --max-time 10 --resolve "$host:$port:127.0.0.1" "$url" >/dev/null 2>&1 && { step "HTTPS is working"; return 0; }
+			curl -fsS --max-time 10 --resolve "$host:$port:127.0.0.1" "https://$host:$port/healthz" >/dev/null 2>&1 && { HEALTH=ok; return 0; }
 			sleep 5
 		done
-		warn "HTTPS isn't working yet. Check that DNS for $host points to this server, that ports 80 and 443"
-		warn "are open (also in your cloud provider's firewall), then see: journalctl -u filerelay -n 50"
+		HEALTH=nocert
 		return 0
 	fi
 	for i in $(seq 1 20); do
-		curl -fsS --max-time 2 "http://127.0.0.1:$port/healthz" >/dev/null 2>&1 && { step "service is up"; return 0; }
+		curl -fsS --max-time 2 "http://127.0.0.1:$port/healthz" >/dev/null 2>&1 && { HEALTH=ok; return 0; }
 		sleep 0.5
 	done
-	warn "the service did not answer on port $port; see: journalctl -u filerelay -n 50"
+	HEALTH=down
 }
 
+row() { printf '  %-12s %s\n' "$1" "$2"; }
+
+# print_summary [full]: the compact result block; "full" (--status) adds details.
 print_summary() {
-	local url ip
+	local url ver ip
 	url=$(base_url)
-	cat <<EOF
-
-${B}filerelay is running${N}   ${D}(version $("$BIN" -version 2>/dev/null | awk '{print $2}' || echo "$VERSION"))${N}
-
-  Web UI:      ${B}$url${N}
-  Read-write token (server A and the web UI):
-               ${B}$TOKEN${N}
-EOF
-	if [ -n "$READ_TOKEN" ]; then
-		cat <<EOF
-  Read-only token (server B):
-               ${B}$READ_TOKEN${N}
-EOF
+	ver=$("$BIN" -version 2>/dev/null | awk '{print $2}') || true
+	ver="${ver:-$VERSION}"
+	printf '\n'
+	case "$HEALTH" in
+	down) printf '%sfilerelay %s is installed but not responding%s\n' "$Y$B" "$ver" "$N" ;;
+	nocert) printf '%sfilerelay %s is running, but has no HTTPS certificate yet%s\n' "$Y$B" "$ver" "$N" ;;
+	*) printf '%sfilerelay %s is running%s\n' "$B" "$ver" "$N" ;;
+	esac
+	printf '\n'
+	row URL "$B$url$N"
+	row Token "$TOKEN  ${D}read-write${N}"
+	[ -z "$READ_TOKEN" ] || row "Read token" "$READ_TOKEN  ${D}read-only${N}"
+	row Client "curl -fsSL $url/relay.sh -o relay && chmod +x relay"
+	row "Agent guide" "$url/agent.md"
+	if [ "${1:-}" = full ]; then
+		row WebDAV "$url/dav/  ${D}(any username, token as password)${N}"
+		row Expiry "$([ "$TTL" = 0 ] && echo never || echo "$TTL after upload")"
+		row Config /etc/filerelay.env
+		row Data "$DATA"
+		row Logs "journalctl -u filerelay -f"
 	fi
-	cat <<EOF
-  Files expire: $([ "$TTL" = 0 ] && echo never || echo "$TTL after upload")
-  WebDAV:      $url/dav/   (any username, token as password)
-
-${B}On server A (source):${N}
-  curl -fsSL $url/relay.sh -o relay && chmod +x relay
-  export RELAY_URL=$url RELAY_TOKEN=$TOKEN
-  ./relay pack /path/to/project /migration
-
-${B}On server B (destination):${N}
-  curl -fsSL $url/relay.sh -o relay && chmod +x relay
-  export RELAY_URL=$url RELAY_TOKEN=${READ_TOKEN:-$TOKEN}
-  ./relay unpack /migration/project.tar.gz /path/to/target
-
-${B}For an AI agent:${N} "Relay files through $url. Read $url/agent.md first."
-
-${D}Config: /etc/filerelay.env · Data: $DATA · Logs: journalctl -u filerelay -f
-Show this again: sudo bash $(basename "${BASH_SOURCE[0]}") --status${N}
-EOF
+	printf '\n'
+	case "$HEALTH" in
+	down) warn "check the logs: journalctl -u filerelay -n 50" ;;
+	nocert) warn "make sure DNS for ${DOMAIN%%,*} points here and ports 80/443 are open; logs: journalctl -u filerelay -n 50" ;;
+	esac
 	if [ -z "$DOMAIN" ]; then
+		warn "plain HTTP, so the token is sent unencrypted; re-run with --domain <name> for HTTPS"
 		ip=$(detect_ip)
-		printf '\n'
-		warn "traffic (including the token) is unencrypted HTTP. Over the internet, re-run with"
-		warn "  --domain your.domain   to get free automatic HTTPS."
 		if [ -z "$PUBLIC_URL" ] && is_private_ip "$ip"; then
-			warn "$ip is a private address. If A and B reach this server via a public IP or name,"
-			warn "use that in RELAY_URL (or re-run with --public-url http://PUBLIC-IP:$(port_of "$LISTEN"))."
+			warn "$ip is a private IP; if clients use another address, re-run with --public-url <url>"
 		fi
 	fi
-	printf '%sAlso allow the port(s) in your cloud provider firewall / security group if there is one.%s\n' "$D" "$N"
+	[ "${1:-}" = full ] || printf '%sDetails: sudo bash %s --status · options: --help%s\n' "$D" "$(basename "${BASH_SOURCE[0]}")" "$N"
 }
 
 # ---- actions ----
@@ -417,7 +409,7 @@ do_install() {
 		READ_TOKEN=$(gen_token)
 	fi
 
-	if [ "$fresh" = 1 ]; then step "installing filerelay $VERSION"; else step "upgrading filerelay (keeping settings from /etc/filerelay.env)"; fi
+	if [ "$fresh" = 1 ]; then step "Installing filerelay $VERSION"; else step "Upgrading filerelay to $VERSION (settings kept)"; fi
 	stage_binary
 	stop_service
 	mv -f "$BIN.new" "$BIN"
@@ -434,10 +426,8 @@ do_install() {
 
 do_status() {
 	load_env || die "filerelay is not installed (no /etc/filerelay.env)"
-	if has_systemd; then
-		printf 'service: %s\n' "$(systemctl is-active filerelay 2>/dev/null || true)"
-	fi
-	print_summary
+	if has_systemd && ! systemctl is-active --quiet filerelay; then HEALTH=down; fi
+	print_summary full
 }
 
 do_uninstall() {
@@ -456,11 +446,11 @@ do_uninstall() {
 		stop_service
 	fi
 	rm -f "$BIN"
-	step "removed the filerelay service and binary"
+	step "Removed the filerelay service and binary"
 	if [ "$PURGE" = 1 ]; then
 		rm -rf "${ROOT:?}$DATA" "$ENVF" "$LOGF"
 		[ -n "$ROOT" ] || { id "$SVC_USER" >/dev/null 2>&1 && userdel "$SVC_USER" 2>/dev/null || true; }
-		step "deleted $DATA, /etc/filerelay.env and the $SVC_USER user"
+		step "Deleted $DATA, /etc/filerelay.env and the $SVC_USER user"
 	else
 		printf 'Kept %s and /etc/filerelay.env (run with --uninstall --purge to delete them).\n' "$DATA"
 	fi
